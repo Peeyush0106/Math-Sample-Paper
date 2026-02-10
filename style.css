@@ -1,0 +1,244 @@
+body {
+    background-color: rgb(255, 203, 227);
+    font-family: 'Gill Sans', 'Gill Sans MT', Calibri, 'Trebuchet MS', sans-serif;
+}
+
+canvas {
+    display: block;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 9999;
+}
+
+h1 {
+    text-align: center;
+    color: rgb(243, 45, 45);
+}
+
+#form {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin-top: 50px;
+}
+
+input[type="button"] {
+    display: block;
+    margin: 20px auto;
+    padding: 10px 20px;
+    font-size: 16px;
+    cursor: pointer;
+}
+
+#heading1 {
+    font-size: 25px;
+}
+
+#heading2 {
+    font-size: 30px;
+}
+
+/* Responsive mobile-first layout and button animations */
+#form {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    padding: 20px;
+}
+
+#image-wrap {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    pointer-events: none;
+}
+
+#heart-gif {
+    width: 28vw;
+    max-width: 140px;
+    height: auto;
+    animation: heartbeat 1.6s ease-in-out infinite;
+}
+
+@keyframes heartbeat {
+    0% { transform: scale(1); }
+    25% { transform: scale(1.08); }
+    50% { transform: scale(1); }
+    75% { transform: scale(1.06); }
+    100% { transform: scale(1); }
+}
+
+#buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    width: 100%;
+    align-items: center;
+}
+
+.btn {
+    -webkit-appearance: none;
+    appearance: none;
+    border: none;
+    padding: 14px 28px;
+    font-size: 18px;
+    border-radius: 12px;
+    background: linear-gradient(180deg,#ff7aa6,#ff527b);
+    color: white;
+    box-shadow: 0 8px 18px rgba(0,0,0,0.12);
+    transform-origin: center;
+    transition: transform 300ms ease, opacity 300ms ease, box-shadow 300ms ease, width 300ms ease;
+    touch-action: manipulation;
+}
+
+.btn:active { transform: scale(0.98); }
+
+.btn.secondary {
+    background: linear-gradient(180deg,#e0e0e0,#c8c8c8);
+    color: #222;
+}
+
+/* subtle initial sizes for scaling from JS */
+#yesBtn { transform: scale(1); }
+#noBtn { transform: scale(1); opacity: 1; }
+
+/* Make layout friendly on small screens */
+@media (max-width:420px) {
+    h1 { font-size: 20px; padding: 0 12px; text-align:center; }
+    .btn { width: 70%; padding: 12px 10px; font-size: 16px; }
+    #buttons { gap: 10px; }
+}
+
+/* Larger screens: keep buttons compact but stacked */
+@media (min-width:421px) {
+    .btn { width: 320px; }
+}
+
+/* ============================================================================
+ * PHOTO BOOTH STYLES
+ * ============================================================================ */
+
+.photo-booth-btn {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    display: inline-block;
+    padding: 20px 40px;
+    font-size: 24px;
+    font-weight: bold;
+    color: white;
+    background: linear-gradient(135deg, #ff6b9d 0%, #ff4757 50%, #ff7979 100%);
+    border: none;
+    border-radius: 50px;
+    box-shadow: 0 20px 50px rgba(255, 71, 87, 0.4);
+    cursor: pointer;
+    transition: all 300ms ease;
+    z-index: 10000;
+    animation: pulse-glow 2s ease-in-out infinite;
+}
+
+.photo-booth-btn:hover {
+    transform: translate(-50%, -50%) scale(1.08);
+    box-shadow: 0 30px 70px rgba(255, 71, 87, 0.6);
+}
+
+.photo-booth-btn:active {
+    transform: translate(-50%, -50%) scale(0.95);
+}
+
+@keyframes pulse-glow {
+    0%, 100% {
+        box-shadow: 0 20px 50px rgba(255, 71, 87, 0.4);
+    }
+    50% {
+        box-shadow: 0 20px 70px rgba(255, 71, 87, 0.7);
+    }
+}
+
+/* Camera Container */
+.camera-container {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: #000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+}
+
+#camera-feed {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);
+}
+
+.camera-controls {
+    position: absolute;
+    bottom: 40px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 20px;
+    z-index: 10001;
+}
+
+.control-btn {
+    -webkit-appearance: none;
+    appearance: none;
+    border: none;
+    padding: 16px 32px;
+    font-size: 18px;
+    font-weight: bold;
+    border-radius: 50px;
+    color: white;
+    cursor: pointer;
+    transition: all 300ms ease;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.3);
+    backdrop-filter: blur(10px);
+}
+
+.control-btn:hover {
+    transform: scale(1.08);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+}
+
+.control-btn:active {
+    transform: scale(0.95);
+}
+
+.capture-btn {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
+
+.stop-btn {
+    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+}
+
+@media (max-width: 600px) {
+    .photo-booth-btn {
+        font-size: 18px;
+        padding: 16px 32px;
+    }
+    
+    .camera-controls {
+        bottom: 20px;
+        gap: 12px;
+    }
+    
+    .control-btn {
+        padding: 12px 24px;
+        font-size: 16px;
+    }
+}
