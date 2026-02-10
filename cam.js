@@ -6,6 +6,9 @@ let mediaStream = null;
 let mediaRecorder = null;
 let recordedChunks = [];
 let isRecording = false;
+let capturedImages = [];
+let videoBlob = null;
+let finalFrameBlob = null;
 
 /**
  * Shows the attractive photo booth button after acceptance
@@ -125,7 +128,7 @@ function startRecording() {
 }
 
 /**
- * Captures a single image from the current video frame
+ * Captures a single image from the current video frame (stores temporarily)
  */
 function captureImage() {
     const video = document.getElementById('camera-feed');
@@ -136,19 +139,27 @@ function captureImage() {
     canvas.height = video.videoHeight;
     ctx.drawImage(video, 0, 0);
     
-    // Download image
+    // Store image blob instead of downloading
     canvas.toBlob((blob) => {
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `photo-${Date.now()}.png`;
-        link.click();
-        URL.revokeObjectURL(url);
+        const imageData = {
+            blob: blob,
+            timestamp: Date.now(),
+            url: URL.createObjectURL(blob)
+        };
+        capturedImages.push(imageData);
+        
+        // Visual feedback - brief subtitle showing image was captured
+        const heading2 = document.getElementById('heading2');
+        const originalText = heading2.textContent;
+        heading2.textContent = `📷 Captured! (${capturedImages.length})`;
+        setTimeout(() => {
+            heading2.textContent = originalText;
+        }, 1500);
     });
 }
 
 /**
- * Stops recording and initiates downloads
+ * Stops recording and prepares files for download
  */
 function stopRecording() {
     if (mediaRecorder && isRecording) {
@@ -160,50 +171,184 @@ function stopRecording() {
         
         // Wait for the recording to finish processing
         setTimeout(() => {
-            const blob = new Blob(recordedChunks, { type: 'video/webm' });
-            downloadVideo(blob);
-            downloadLastFrame();
-            cleanup();
+            videoBlob = new Blob(recordedChunks, { type: 'video/webm' });
+            
+            // Capture final frame
+            const video = document.getElementById('camera-feed');
+            const canvas = document.getElementById('capture-canvas');
+            const ctx = canvas.getContext('2d');
+            
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            ctx.drawImage(video, 0, 0);
+            
+            canvas.toBlob((blob) => {
+                finalFrameBlob = blob;
+                cleanup();
+            });
         }, 1000);
     }
 }
 
 /**
- * Downloads the recorded video
+ * Downloads all captured files at once
  */
-function downloadVideo(blob) {
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `video-${Date.now()}.webm`;
-    link.click();
-    URL.revokeObjectURL(url);
+async function downloadAll() {
+    // Use JSZip library if available, otherwise download files individually with delay
+    if (typeof JSZip !== 'undefined') {
+        const zip = new JSZip();
+        
+        // Add all captured images
+        capturedImages.forEach((img, index) => {
+            zip.file(`photo-${index + 1}.png`, img.blob);
+        });
+        
+        // Add video
+        if (videoBlob) {
+            zip.file(`video-recording.webm`, videoBlob);
+        }
+        
+        // Add final frame
+        if (finalFrameBlob) {
+            zip.file(`final-photo.png`, finalFrameBlob);
+        }
+        
+        // Generate and download zip
+        zip.generateAsync({ type: 'blob' }).then((blob) => {
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `photo-booth-${Date.now()}.zip`;
+            link.click();
+            URL.revokeObjectURL(url);
+        });
+    } else {
+        // Fallback: download files individually with staggered delays
+        let delay = 0;
+        
+        // Download video first
+        if (videoBlob) {
+            setTimeout(() => {
+                const url = URL.createObjectURL(videoBlob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `video-${Date.now()}.webm`;
+                link.click();
+                URL.revokeObjectURL(url);
+            }, delay);
+            delay += 500;
+        }
+        
+        // Download final frame
+        if (finalFrameBlob) {
+            setTimeout(() => {
+                const url = URL.createObjectURL(finalFrameBlob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `final-photo-${Date.now()}.png`;
+                link.click();
+                URL.revokeObjectURL(url);
+            }, delay);
+            delay += 500;
+        }
+        
+        // Download captured images
+        capturedImages.forEach((img, index) => {
+            setTimeout(() => {
+                const url = URL.createObjectURL(img.blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `photo-${index + 1}-${Date.now()}.png`;
+                link.click();
+                URL.revokeObjectURL(url);
+            }, delay);
+            delay += 500;
+        });
+    }
 }
 
 /**
- * Downloads the final frame as an image
+ * Shows the thank you page with all captured files ready to download
  */
-function downloadLastFrame() {
-    const video = document.getElementById('camera-feed');
-    const canvas = document.getElementById('capture-canvas');
-    const ctx = canvas.getContext('2d');
+function showDownloadPage() {
+    const container = document.createElement('div');
+    container.id = 'download-page';
+    container.className = 'download-page';
     
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    ctx.drawImage(video, 0, 0);
+    // Create content wrapper
+    const content = document.createElement('div');
+    content.className = 'download-content';
     
-    canvas.toBlob((blob) => {
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `final-photo-${Date.now()}.png`;
-        link.click();
-        URL.revokeObjectURL(url);
+    // Thank you message
+    const heading = document.createElement('h2');
+    heading.className = 'download-heading';
+    heading.innerHTML = 'Thanks for saying yes! ❤️';
+    
+    const subheading = document.createElement('p');
+    subheading.className = 'download-subheading';
+    subheading.innerHTML = `Your memories are ready! Captured ${capturedImages.length} photos`;
+    
+    // Files summary
+    const filesSummary = document.createElement('div');
+    filesSummary.className = 'files-summary';
+    
+    const filesList = document.createElement('ul');
+    filesList.className = 'files-list';
+    
+    // Video file
+    if (videoBlob) {
+        const videoItem = document.createElement('li');
+        videoItem.innerHTML = `🎥 Video Recording (${(videoBlob.size / 1024 / 1024).toFixed(2)} MB)`;
+        filesList.appendChild(videoItem);
+    }
+    
+    // Final photo
+    if (finalFrameBlob) {
+        const finalItem = document.createElement('li');
+        finalItem.innerHTML = `📸 Final Photo (${(finalFrameBlob.size / 1024).toFixed(2)} KB)`;
+        filesList.appendChild(finalItem);
+    }
+    
+    // Captured images
+    capturedImages.forEach((img, index) => {
+        const imgItem = document.createElement('li');
+        imgItem.innerHTML = `📷 Photo ${index + 1} (${(img.blob.size / 1024).toFixed(2)} KB)`;
+        filesList.appendChild(imgItem);
     });
+    
+    filesSummary.appendChild(filesList);
+    
+    // Buttons container
+    const buttonsContainer = document.createElement('div');
+    buttonsContainer.className = 'download-buttons';
+    
+    // Download all button
+    const downloadBtn = document.createElement('button');
+    downloadBtn.className = 'download-btn primary-btn';
+    downloadBtn.innerHTML = '⬇️ Download All';
+    downloadBtn.onclick = downloadAll;
+    
+    // Done button
+    const doneBtn = document.createElement('button');
+    doneBtn.className = 'download-btn secondary-btn';
+    doneBtn.innerHTML = '✨ Done';
+    doneBtn.onclick = finishAndReset;
+    
+    buttonsContainer.appendChild(downloadBtn);
+    buttonsContainer.appendChild(doneBtn);
+    
+    // Assemble the page
+    content.appendChild(heading);
+    content.appendChild(subheading);
+    content.appendChild(filesSummary);
+    content.appendChild(buttonsContainer);
+    
+    container.appendChild(content);
+    document.body.appendChild(container);
 }
 
 /**
- * Cleans up the camera interface
+ * Cleans up the camera interface and shows download page
  */
 function cleanup() {
     const container = document.getElementById('camera-container');
@@ -212,9 +357,32 @@ function cleanup() {
     const video = document.getElementById('camera-feed');
     if (video) video.remove();
     
+    // Show the download page with all captured files
+    showDownloadPage();
+}
+
+/**
+ * Cleans up resources and finishes the photo booth session
+ */
+function finishAndReset() {
+    // Clean up blob URLs to free memory
+    capturedImages.forEach(img => {
+        URL.revokeObjectURL(img.url);
+    });
+    
+    // Remove download page
+    const downloadPage = document.getElementById('download-page');
+    if (downloadPage) downloadPage.remove();
+    
+    // Reset variables
+    capturedImages = [];
+    videoBlob = null;
+    finalFrameBlob = null;
+    recordedChunks = [];
+    
     // Return to normal state
-    const heading2 = document.getElementById('heading2');
     document.body.style.backgroundColor = 'rgb(255, 203, 227)';
+    const heading2 = document.getElementById('heading2');
     heading2.textContent = 'Thanks for saying yes! ❤️';
 }
 
@@ -225,3 +393,5 @@ window.showPhotoBoothButton = showPhotoBoothButton;
 window.startPhotoBooth = startPhotoBooth;
 window.captureImage = captureImage;
 window.stopRecording = stopRecording;
+window.downloadAll = downloadAll;
+window.finishAndReset = finishAndReset;
