@@ -2,23 +2,13 @@
 // CAMERA AND PHOTO BOOTH MODULE
 // ============================================================================
 
-// Camera and video settings
-const CAMERA_WIDTH_IDEAL = 1920;          // Ideal camera width (1920 = 1080p)
-const CAMERA_HEIGHT_IDEAL = 1080;         // Ideal camera height
-const CAMERA_FRAME_RATE_IDEAL = 60;       // Ideal frame rate (smooth video)
-const CAMERA_FRAME_RATE_MIN = 30;         // Minimum acceptable frame rate
-const VIDEO_BITRATE_VP9 = 8000000;        // VP9 bitrate: 8 Mbps (highest quality)
-const VIDEO_BITRATE_VP8 = 6000000;        // VP8 bitrate: 6 Mbps
-const VIDEO_BITRATE_DEFAULT = 5000000;    // Default bitrate: 5 Mbps (fallback)
-
-// Camera state variables
 let mediaStream = null;
 let mediaRecorder = null;
 let recordedChunks = [];
 let isRecording = false;
 
 /**
- * Display the clickbait photo booth button after acceptance
+ * Shows the attractive photo booth button after acceptance
  */
 function showPhotoBoothButton() {
     const button = document.createElement('button');
@@ -30,28 +20,14 @@ function showPhotoBoothButton() {
 }
 
 /**
- * Initialize camera access and start photo booth
+ * Initiates the photo booth by requesting camera permission
  */
 async function startPhotoBooth() {
     try {
-        // Request camera permission with high-quality settings
+        // Request camera permission
         mediaStream = await navigator.mediaDevices.getUserMedia({
-            video: {
-                facingMode: 'user',
-                width: { ideal: CAMERA_WIDTH_IDEAL, min: 1280 },
-                height: { ideal: CAMERA_HEIGHT_IDEAL, min: 720 },
-                frameRate: { ideal: CAMERA_FRAME_RATE_IDEAL, min: CAMERA_FRAME_RATE_MIN },
-                aspectRatio: 16 / 9,
-                brightness: { ideal: 100 },
-                contrast: { ideal: 100 },
-                saturation: { ideal: 100 },
-                sharpness: { ideal: 100 }
-            },
-            audio: {
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: false
-            }
+            video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+            audio: true
         });
         
         // Remove the photo booth button
@@ -68,7 +44,7 @@ async function startPhotoBooth() {
 }
 
 /**
- * Build the camera UI with video feed and controls
+ * Creates the camera interface with video feed and control buttons
  */
 function createCameraInterface() {
     stopConfetti();
@@ -121,31 +97,21 @@ function createCameraInterface() {
 }
 
 /**
- * Start recording the video stream
+ * Starts recording the camera feed
  */
 function startRecording() {
     recordedChunks = [];
+    const options = {
+        mimeType: 'video/webm;codecs=vp9',
+        videoBitsPerSecond: 2500000
+    };
     
-    // Try codecs in order of preference for quality
-    let options = null;
-    const codecOptions = [
-        { mimeType: 'video/webm;codecs=vp9', videoBitsPerSecond: VIDEO_BITRATE_VP9 },
-        { mimeType: 'video/webm;codecs=vp8', videoBitsPerSecond: VIDEO_BITRATE_VP8 },
-        { mimeType: 'video/webm', videoBitsPerSecond: VIDEO_BITRATE_DEFAULT },
-        { mimeType: 'video/mp4', videoBitsPerSecond: VIDEO_BITRATE_DEFAULT }
-    ];
-    
-    // Select the first supported codec option
-    for (let opt of codecOptions) {
-        if (MediaRecorder.isTypeSupported(opt.mimeType)) {
-            options = opt;
-            break;
-        }
+    // Fallback for browsers that don't support vp9
+    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+        options.mimeType = 'video/webm;codecs=vp8';
     }
-    
-    // Fallback with default settings if no codec is supported
-    if (!options) {
-        options = { videoBitsPerSecond: VIDEO_BITRATE_DEFAULT };
+    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+        options.mimeType = 'video/webm';
     }
     
     mediaRecorder = new MediaRecorder(mediaStream, options);
@@ -159,7 +125,7 @@ function startRecording() {
 }
 
 /**
- * Capture a still image from the video feed
+ * Captures a single image from the current video frame
  */
 function captureImage() {
     const video = document.getElementById('camera-feed');
@@ -182,7 +148,7 @@ function captureImage() {
 }
 
 /**
- * Stop recording and export video + final frame
+ * Stops recording and initiates downloads
  */
 function stopRecording() {
     if (mediaRecorder && isRecording) {
@@ -203,7 +169,7 @@ function stopRecording() {
 }
 
 /**
- * Download the recorded video file
+ * Downloads the recorded video
  */
 function downloadVideo(blob) {
     const url = URL.createObjectURL(blob);
@@ -215,7 +181,7 @@ function downloadVideo(blob) {
 }
 
 /**
- * Capture and download the final frame from the recording
+ * Downloads the final frame as an image
  */
 function downloadLastFrame() {
     const video = document.getElementById('camera-feed');
@@ -237,7 +203,7 @@ function downloadLastFrame() {
 }
 
 /**
- * Clean up camera interface and return to normal state
+ * Cleans up the camera interface
  */
 function cleanup() {
     const container = document.getElementById('camera-container');
@@ -247,14 +213,15 @@ function cleanup() {
     if (video) video.remove();
     
     // Return to normal state
-    document.body.style.backgroundColor = 'rgb(255, 203, 227)';
     const heading2 = document.getElementById('heading2');
-    if (heading2) heading2.textContent = 'Thanks for saying yes! ❤️';
+    document.body.style.backgroundColor = 'rgb(255, 203, 227)';
+    heading2.textContent = 'Thanks for saying yes! ❤️';
 }
 
 // ============================================================================
 // EXPORT FUNCTIONS TO WINDOW
 // ============================================================================
+window.showPhotoBoothButton = showPhotoBoothButton;
 window.startPhotoBooth = startPhotoBooth;
 window.captureImage = captureImage;
 window.stopRecording = stopRecording;
