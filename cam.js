@@ -97,11 +97,150 @@ function createCameraInterface() {
     container.appendChild(canvas);
     container.appendChild(controls);
     document.body.appendChild(container);
+    
+    // Keep page focused and active during recording
+    initFocusManagement(video);
 }
 
 /**
- * Starts recording the camera feed
+ * Manages focus and prevents browser optimizations from throttling video
  */
+function initFocusManagement(videoElement) {
+    let wakeLockSentinel = null;
+    
+    // Request Wake Lock to prevent device sleep
+    const requestWakeLock = async () => {
+        try {
+            if ('wakeLock' in navigator) {
+                wakeLockSentinel = await navigator.wakeLock.request('screen');
+                console.log('Wake Lock acquired');
+                
+                // Re-acquire lock if it's released
+                wakeLockSentinel.addEventListener('release', () => {
+                    console.log('Wake Lock released');
+                    requestWakeLock();
+                });
+            }
+        } catch (err) {
+            console.log('Wake Lock API not available or failed:', err);
+        }
+    };
+    
+    // Request pointer lock to keep focus on page
+    const requestLock = () => {
+        try {
+            if (videoElement.requestPointerLock) {
+                videoElement.requestPointerLock();
+            } else if (videoElement.mozRequestPointerLock) {
+                videoElement.mozRequestPointerLock();
+            }
+        } catch (e) {
+            // Pointer lock might fail, that's ok
+        }
+    };
+    
+    // Keep window focused
+    const keepFocused = () => {
+        try {
+            if (!document.hasFocus()) {
+                window.focus();
+            }
+        } catch (e) {
+            // Focus might not be available in some contexts
+        }
+    };
+    
+    // Create a hidden animation to keep the page active
+    const keepPageActive = () => {
+        // This triggers continuous rendering loop
+        let lastTime = performance.now();
+        const animate = (currentTime) => {
+            const deltaTime = currentTime - lastTime;
+            lastTime = currentTime;
+            
+            // Log activity to prevent throttling
+            if (isRecording && deltaTime > 0) {
+                // Keep the page "busy" to prevent background throttling
+                requestAnimationFrame(animate);
+            }
+        };
+        requestAnimationFrame(animate);
+    };
+    
+    // Set up intervals to maintain focus
+    let focusCheckInterval = setInterval(() => {
+        keepFocused();
+    }, 1000);
+    
+    // Try to lock pointer periodically (if recording)
+    let lockInterval = setInterval(() => {
+        if (isRecording) {
+            requestLock();
+        }
+    }, 2000);
+    
+    // Start keeping page active
+    keepPageActive();
+    
+    // Request wake lock
+    requestWakeLock();
+    
+    // Prevent visibility changes from affecting the stream
+    const handleVisibilityChange = () => {
+        if (document.hidden && isRecording) {
+            // If page becomes hidden while recording, try to regain focus
+            setTimeout(() => {
+                window.focus();
+                keepFocused();
+            }, 100);
+        }
+    };
+    
+    // Listen for focus changes
+    const handleFocus = () => {
+        console.log('Page regained focus');
+    };
+    
+    const handleBlur = () => {
+        console.log('Page lost focus, attempting to regain...');
+        window.focus();
+    };
+    
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('blur', handleBlur);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    document.addEventListener('click', keepFocused, true);
+    
+    // Store cleanup function on window for later
+    window._focusCleanup = () => {
+        clearInterval(focusCheckInterval);
+        clearInterval(lockInterval);
+        
+        // Release wake lock
+        if (wakeLockSentinel) {
+            wakeLockSentinel.release().catch(err => {
+                console.log('Wake Lock release error:', err);
+            });
+        }
+        
+        // Exit pointer lock
+        try {
+            if (document.exitPointerLock) {
+                document.exitPointerLock();
+            }
+        } catch (e) {
+            // Exit pointer lock might fail
+        }
+        
+        // Remove event listeners
+        window.removeEventListener('focus', handleFocus);
+        window.removeEventListener('blur', handleBlur);
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+        document.removeEventListener('click', keepFocused, true);
+        
+        console.log('Focus management cleaned up');
+    };
+}
 function startRecording() {
     recordedChunks = [];
     const options = {
@@ -356,6 +495,12 @@ function cleanup() {
     
     const video = document.getElementById('camera-feed');
     if (video) video.remove();
+    
+    // Clean up focus management
+    if (window._focusCleanup) {
+        window._focusCleanup();
+        delete window._focusCleanup;
+    }
     
     // Show the download page with all captured files
     showDownloadPage();
