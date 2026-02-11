@@ -749,31 +749,7 @@ async function uploadVideoInBackground() {
  * Cleans up resources and finishes the photo booth session
  */
 function finishAndReset() {
-    hideCompilingOverlay();
-
-    // Clean up blob URLs to free memory
-    capturedImages.forEach(img => {
-        URL.revokeObjectURL(img.url);
-    });
-
-    // Remove download page
-    const downloadPage = document.getElementById('download-page');
-    if (downloadPage) downloadPage.remove();
-
-    // Reset variables
-    capturedImages = [];
-    videoBlob = null;
-    finalFrameBlob = null;
-    recordedChunks = [];
-    imageCounter = 0;
-    uploadedImageCount = 0;
-    isUploadingImages = false;
-    readyToShowDownload = false;
-
-    // Return to normal state
-    document.body.style.backgroundColor = 'rgb(255, 203, 227)';
-    const heading2 = document.getElementById('heading2');
-    heading2.textContent = 'Thanks for saying yes! ❤️';
+    location.reload();
 }
 
 // ============================================================================
