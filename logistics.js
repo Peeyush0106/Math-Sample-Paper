@@ -194,7 +194,7 @@ function reject() {
         noBtn.style.pointerEvents = 'none';
         yesBtn.style.background = "rgb(255, 0, 64)";
         yesBtn.style.color = "white";
-        yesBtn.innerText = "SAY YES 💗";
+        yesBtn.innerText = "SAY YES";
         // Lock page scroll so a full-screen CTA never creates scrollbars.
         document.documentElement.style.overflow = 'hidden';
         document.body.style.overflow = 'hidden';
