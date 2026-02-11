@@ -1,9 +1,11 @@
 // DOM Elements
 const yesBtn = document.getElementById('yesBtn');
 const noBtn = document.getElementById('noBtn');
+const buttonsWrap = document.getElementById('buttons');
 const heading1 = document.getElementById('heading1');
 const heading2 = document.getElementById('heading2');
 const img = document.getElementById('image-wrap');
+const centerGif = document.getElementById('center-gif');
 
 // Text strings
 const ACCEPTED_TEXT = 'YAY! ❤️';
@@ -13,6 +15,27 @@ const REJECTION_MESSAGES = [
     'Please? I made cookies...',
     'BE MY VALENTINE! ❤️',
     '🤡'
+];
+
+// GIF sequence (index 0 = initial state before any "No" click).
+// Replace these entries with your actual gif files in order.
+const PLACEHOLDER_GIF = `data:image/svg+xml;utf8,${encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+        <rect width="400" height="400" fill="#ffe5ef"/>
+        <rect x="14" y="14" width="372" height="372" rx="18" fill="none" stroke="#ff4d6d" stroke-width="6" stroke-dasharray="14 10"/>
+        <path d="M24 24 L376 376 M376 24 L24 376" stroke="#ff7aa6" stroke-width="4" opacity="0.75"/>
+        <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" font-family="Arial, sans-serif" font-size="44" fill="#ff2e63" font-weight="700">GIF</text>
+        <text x="50%" y="62%" dominant-baseline="middle" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#ff2e63">wireframe placeholder</text>
+    </svg>`
+)}`;
+
+const GIF_SEQUENCE = [
+    PLACEHOLDER_GIF,
+    PLACEHOLDER_GIF,
+    PLACEHOLDER_GIF,
+    PLACEHOLDER_GIF,
+    PLACEHOLDER_GIF,
+    PLACEHOLDER_GIF
 ];
 
 // Yes button growth settings
@@ -35,6 +58,21 @@ let noCount = 0;  // Tracks how many times the user clicked "No"
 let hasAccepted = false; // Prevent duplicate accept animations
 let hasTriggeredPhotoTransition = false; // Prevent duplicate flash/photo transition
 
+function setCenterGifByIndex(index) {
+    if (!centerGif || GIF_SEQUENCE.length === 0) return;
+    const safeIndex = Math.max(0, Math.min(index, GIF_SEQUENCE.length - 1));
+    centerGif.src = GIF_SEQUENCE[safeIndex];
+}
+
+function setChoiceButtonsFixed(isFixed) {
+    if (!buttonsWrap) return;
+    buttonsWrap.classList.toggle('choice-fixed', isFixed);
+}
+
+// Keep Yes/No pinned while both choices are visible.
+setChoiceButtonsFixed(true);
+setCenterGifByIndex(0);
+
 function handlePhotoCtaClick() {
     if (hasTriggeredPhotoTransition) return;
     hasTriggeredPhotoTransition = true;
@@ -54,6 +92,7 @@ function handlePhotoCtaClick() {
 function accept() {
     if (hasAccepted) return;
     hasAccepted = true;
+    setChoiceButtonsFixed(false);
 
     startConfetti();
     yesBtn.disabled = true;
@@ -124,6 +163,7 @@ function accept() {
 
 function reject() {
     noCount += 1;
+    setCenterGifByIndex(noCount);
 
     // Show the corresponding rejection message from the list
     const messageIndex = (noCount - 1) % REJECTION_MESSAGES.length;
@@ -146,6 +186,7 @@ function reject() {
     // Calculate and apply "Yes" button growth
     const yesScale = Math.min(1 + noCount * YES_SCALE_INCREMENT_PER_NO, YES_SCALE_MAX);
     if (isFinalMessage) {
+        setChoiceButtonsFixed(false);
         noBtn.style.transition = `opacity ${NO_DISAPPEAR_ANIMATION_MS}ms ease, transform ${NO_DISAPPEAR_ANIMATION_MS}ms ease`;
         noBtn.style.opacity = '0';
         noBtn.style.transform = 'scale(0)';
