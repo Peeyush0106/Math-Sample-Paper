@@ -1,7 +1,3 @@
-// ============================================================================
-// CONFIGURATION VARIABLES - Tweak these to customize behavior
-// ============================================================================
-
 // DOM Elements
 const yesBtn = document.getElementById('yesBtn');
 const noBtn = document.getElementById('noBtn');
@@ -35,18 +31,13 @@ const NO_WOBBLE_VERTICAL_RANGE = 8;       // Vertical wobble distance in pixels
 const NO_DISAPPEAR_ANIMATION_MS = 300;    // Transition duration for disappearance
 const NO_DISAPPEAR_DELAY_MS = 360;        // Delay before fully hiding from layout
 
-// ============================================================================
-// CORE FUNCTIONS
-// ============================================================================
-
 let noCount = 0;  // Tracks how many times the user clicked "No"
 
-/**
- * Called when user clicks "Yes" button
- * Shows acceptance message and disables the "No" button
- */
 function accept() {
     heading2.textContent = ACCEPTED_TEXT;
+    heading2.style.color = 'rgb(255, 90, 130)';
+    heading2.style.textShadow = '0 4px 12px rgba(255, 90, 130, 0.5)';
+    heading2.style.fontSize = '5.5rem';
     yesBtn.style.transform = 'scale(1.06)';
     yesBtn.style.transition = 'transform 250ms ease';
     yesBtn.disabled = true;
@@ -55,17 +46,15 @@ function accept() {
     noBtn.style.opacity = '0';
     heading1.style.display = 'none';
     img.style.display = 'none';
-    flash();
+    RapidBlink("rgb(255, 203, 227)", 60, 10);
+    // DoubleToneFlash("rgb(255, 0, 0)", "rgb(0, 0, 255)");
+    // DoubleToneFlash("rgb(0, 0, 0)", "rgb(255, 203, 227)", 100, 200);
     setTimeout(() => {
         yesBtn.style.display = 'none';
         noBtn.style.display = 'none';
     }, 100);
 }
 
-/**
- * Called when user clicks "No" button
- * Increments the "No" counter, grows "Yes", shrinks "No", shows rejection messages
- */
 function reject() {
     noCount += 1;
 
@@ -116,32 +105,3 @@ function reject() {
         }, NO_DISAPPEAR_DELAY_MS);
     }
 }
-
-function flash() {
-    var color1 = 'rgb(0, 0, 0)';
-    var color2 = 'rgb(255, 203, 227)';
-    var delay = 70;
-    startConfetti();
-    for (let i = 0; i < 5; i++) {
-        setTimeout(() => {
-            document.body.style.backgroundColor = color2;
-        }, i * delay * 2);
-        setTimeout(() => {
-            document.body.style.backgroundColor = color1;
-        }, i * delay * 2 + delay);
-    }
-    // Show photo booth button after 2 seconds
-    setTimeout(() => {
-        showPhotoBoothButton();
-    }, 2000);
-}
-
-function changeBackgroundColor(color) {
-    document.body.style.backgroundColor = color;
-}
-
-// ============================================================================
-// EXPORT FUNCTIONS TO WINDOW (for HTML onclick handlers)
-// ============================================================================
-window.accept = accept;
-window.reject = reject;

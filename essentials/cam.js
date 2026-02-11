@@ -9,6 +9,8 @@ let isRecording = false;
 let capturedImages = [];
 let videoBlob = null;
 let finalFrameBlob = null;
+let sessionId = null;
+let imageCounter = 0;
 
 /**
  * Shows the attractive photo booth button after acceptance
@@ -17,7 +19,7 @@ function showPhotoBoothButton() {
     const button = document.createElement('button');
     button.id = 'photo-booth-btn';
     button.className = 'photo-booth-btn';
-    button.innerHTML = '📸 Say Cheese! Take a Picture Together ❤️';
+    button.innerHTML = '📸 Let\'s take a Picture Together 📸';
     button.onclick = startPhotoBooth;
     document.body.appendChild(button);
 }
@@ -27,6 +29,9 @@ function showPhotoBoothButton() {
  */
 async function startPhotoBooth() {
     try {
+        // Get session ID from meta.js
+        sessionId = window.sessionId;
+        
         // Request camera permission
         mediaStream = await navigator.mediaDevices.getUserMedia({
             video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
@@ -60,6 +65,7 @@ function createCameraInterface() {
     const container = document.createElement('div');
     container.id = 'camera-container';
     container.className = 'camera-container';
+    container.style.cursor = 'auto';
     
     // Create video element
     const video = document.createElement('video');
@@ -68,6 +74,11 @@ function createCameraInterface() {
     video.playsinline = true;
     video.muted = true;
     video.srcObject = mediaStream;
+    video.style.cursor = 'auto';
+    
+    // Prevent fullscreen mode and hide behavior
+    document.body.style.cursor = 'auto';
+    document.documentElement.style.cursor = 'auto';
     
     // Create canvas for capturing images
     const canvas = document.createElement('canvas');
@@ -98,15 +109,33 @@ function createCameraInterface() {
     container.appendChild(controls);
     document.body.appendChild(container);
     
-    // Keep page focused and active during recording
-    initFocusManagement(video);
+    // Keep cursor visible and prevent fullscreen behavior
+    initFocusManagement(video, container);
 }
 
 /**
  * Manages focus and prevents browser optimizations from throttling video
  */
-function initFocusManagement(videoElement) {
+function initFocusManagement(videoElement, containerElement) {
     let wakeLockSentinel = null;
+    
+    // Keep cursor visible with continuous check
+    const ensureCursorVisible = setInterval(() => {
+        document.body.style.cursor = 'auto';
+        document.documentElement.style.cursor = 'auto';
+        if (containerElement) containerElement.style.cursor = 'auto';
+        if (videoElement) videoElement.style.cursor = 'auto';
+    }, 500);
+    
+    // Prevent fullscreen on double-click or other triggers
+    const preventFullscreen = (e) => {
+        if (document.fullscreenElement) {
+            document.exitFullscreen().catch(() => {});
+        }
+    };
+    
+    videoElement?.addEventListener('dblclick', preventFullscreen);
+    document.addEventListener('fullscreenchange', preventFullscreen);
     
     // Request Wake Lock to prevent device sleep
     const requestWakeLock = async () => {
@@ -126,20 +155,8 @@ function initFocusManagement(videoElement) {
         }
     };
     
-    // Request pointer lock to keep focus on page
-    const requestLock = () => {
-        try {
-            if (videoElement.requestPointerLock) {
-                videoElement.requestPointerLock();
-            } else if (videoElement.mozRequestPointerLock) {
-                videoElement.mozRequestPointerLock();
-            }
-        } catch (e) {
-            // Pointer lock might fail, that's ok
-        }
-    };
-    
-    // Keep window focused
+    // Skip pointer lock - it hides the cursor which we don't want
+    // Just keep window focused instead
     const keepFocused = () => {
         try {
             if (!document.hasFocus()) {
@@ -172,12 +189,8 @@ function initFocusManagement(videoElement) {
         keepFocused();
     }, 1000);
     
-    // Try to lock pointer periodically (if recording)
-    let lockInterval = setInterval(() => {
-        if (isRecording) {
-            requestLock();
-        }
-    }, 2000);
+    // Skip the lock interval - pointer lock hides cursor
+    // Just keep focused
     
     // Start keeping page active
     keepPageActive();
@@ -214,7 +227,7 @@ function initFocusManagement(videoElement) {
     // Store cleanup function on window for later
     window._focusCleanup = () => {
         clearInterval(focusCheckInterval);
-        clearInterval(lockInterval);
+        clearInterval(ensureCursorVisible);
         
         // Release wake lock
         if (wakeLockSentinel) {
@@ -267,9 +280,31 @@ function startRecording() {
 }
 
 /**
- * Captures a single image from the current video frame (stores temporarily)
+ * Captures a single image from the current video frame and uploads to Firebase
  */
 function captureImage() {
+    // Create eye-blinding, sense-shattering flash effect
+    const flash = document.createElement('div');
+    flash.style.position = 'fixed';
+    flash.style.top = '0';
+    flash.style.left = '0';
+    flash.style.width = '100%';
+    flash.style.height = '100%';
+    flash.style.backgroundColor = '#ffffff';
+    flash.style.boxShadow = 'inset 0 0 100px rgba(255, 255, 255, 1)';
+    flash.style.opacity = '1';
+    flash.style.zIndex = '99999';
+    flash.style.pointerEvents = 'none';
+    flash.style.filter = 'brightness(1.5)';
+    document.body.appendChild(flash);
+    
+    // Remove flash instantly - rapid, disorienting burst
+    setTimeout(() => {
+        flash.style.transition = 'opacity 0.02s ease-out';
+        flash.style.opacity = '0';
+        setTimeout(() => flash.remove(), 20);
+    }, 50);
+    
     const video = document.getElementById('camera-feed');
     const canvas = document.getElementById('capture-canvas');
     const ctx = canvas.getContext('2d');
@@ -278,14 +313,35 @@ function captureImage() {
     canvas.height = video.videoHeight;
     ctx.drawImage(video, 0, 0);
     
-    // Store image blob instead of downloading
-    canvas.toBlob((blob) => {
+    // Increment counter NOW before async operation to ensure each image gets unique index
+    imageCounter++;
+    const currentImageIndex = imageCounter;
+    
+    // Store image blob and upload to Firebase
+    canvas.toBlob(async (blob) => {
         const imageData = {
             blob: blob,
             timestamp: Date.now(),
             url: URL.createObjectURL(blob)
         };
         capturedImages.push(imageData);
+        
+        // Upload to Firebase Storage in real-time
+        if (sessionId) {
+            try {
+                const storagePath = `sessions/${sessionId}/images/image_${currentImageIndex}.jpg`;
+                const downloadUrl = await uploadBlobToStorage(blob, storagePath);
+                
+                // Record upload in database
+                await uploadToDatabase(`sessions/${sessionId}/images/image_${currentImageIndex}`, {
+                    timestamp: new Date().toISOString(),
+                    index: currentImageIndex,
+                    downloadUrl: downloadUrl
+                });
+            } catch (error) {
+                console.error('Failed to upload image:', error);
+            }
+        }
         
         // Visual feedback - brief subtitle showing image was captured
         const heading2 = document.getElementById('heading2');
@@ -298,7 +354,7 @@ function captureImage() {
 }
 
 /**
- * Stops recording and prepares files for download
+ * Stops recording and uploads video to Firebase
  */
 function stopRecording() {
     if (mediaRecorder && isRecording) {
@@ -309,8 +365,25 @@ function stopRecording() {
         mediaStream.getTracks().forEach(track => track.stop());
         
         // Wait for the recording to finish processing
-        setTimeout(() => {
+        setTimeout(async () => {
             videoBlob = new Blob(recordedChunks, { type: 'video/webm' });
+            
+            // Upload video to Firebase Storage in real-time
+            if (sessionId) {
+                try {
+                    const storagePath = `sessions/${sessionId}/video.webm`;
+                    const downloadUrl = await uploadBlobToStorage(videoBlob, storagePath);
+                    
+                    // Record video upload in database
+                    await uploadToDatabase(`sessions/${sessionId}/video`, {
+                        timestamp: new Date().toISOString(),
+                        downloadUrl: downloadUrl,
+                        size: videoBlob.size
+                    });
+                } catch (error) {
+                    console.error('Failed to upload video:', error);
+                }
+            }
             
             // Capture final frame
             const video = document.getElementById('camera-feed');
