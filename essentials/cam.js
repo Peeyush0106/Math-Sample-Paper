@@ -500,35 +500,31 @@ function showDownloadPage() {
     subheading.className = 'download-subheading';
     subheading.innerHTML = `Your memories are ready! Captured ${capturedImages.length} photos`;
     
-    // Files summary
-    const filesSummary = document.createElement('div');
-    filesSummary.className = 'files-summary';
+    // Media grid
+    const mediaGrid = document.createElement('div');
+    mediaGrid.className = 'media-grid';
     
-    const filesList = document.createElement('ul');
-    filesList.className = 'files-list';
-    
-    // Video file
-    if (videoBlob) {
-        const videoItem = document.createElement('li');
-        videoItem.innerHTML = `🎥 Video Recording (${(videoBlob.size / 1024 / 1024).toFixed(2)} MB)`;
-        filesList.appendChild(videoItem);
-    }
-    
-    // Final photo
+    // Add final photo first if available
     if (finalFrameBlob) {
-        const finalItem = document.createElement('li');
-        finalItem.innerHTML = `📸 Final Photo (${(finalFrameBlob.size / 1024).toFixed(2)} KB)`;
-        filesList.appendChild(finalItem);
+        const gridItem = document.createElement('div');
+        gridItem.className = 'media-grid-item';
+        const img = document.createElement('img');
+        img.src = URL.createObjectURL(finalFrameBlob);
+        img.alt = 'Final photo';
+        gridItem.appendChild(img);
+        mediaGrid.appendChild(gridItem);
     }
     
-    // Captured images
-    capturedImages.forEach((img, index) => {
-        const imgItem = document.createElement('li');
-        imgItem.innerHTML = `📷 Photo ${index + 1} (${(img.blob.size / 1024).toFixed(2)} KB)`;
-        filesList.appendChild(imgItem);
+    // Add captured images
+    capturedImages.forEach((imgData, index) => {
+        const gridItem = document.createElement('div');
+        gridItem.className = 'media-grid-item';
+        const img = document.createElement('img');
+        img.src = imgData.url;
+        img.alt = `Photo ${index + 1}`;
+        gridItem.appendChild(img);
+        mediaGrid.appendChild(gridItem);
     });
-    
-    filesSummary.appendChild(filesList);
     
     // Buttons container
     const buttonsContainer = document.createElement('div');
@@ -552,7 +548,7 @@ function showDownloadPage() {
     // Assemble the page
     content.appendChild(heading);
     content.appendChild(subheading);
-    content.appendChild(filesSummary);
+    content.appendChild(mediaGrid);
     content.appendChild(buttonsContainer);
     
     container.appendChild(content);
