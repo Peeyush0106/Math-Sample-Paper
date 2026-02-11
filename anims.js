@@ -18,19 +18,44 @@ function DoubleToneFlash(color1, color2, delay, flashes) {
     }, 2000);
 }
 
-function RapidBlink(color, delay, flashes, button) {
+function RapidBlink(color, delay, flashes, button, rapidCapture, then) {
     var color = color || 'rgb(255, 0, 0)';
     var delay = delay || 60;
     var flashes = flashes || 7;
-    startConfetti();
+
+
+    const container = document.createElement('div');
+    container.style.position = 'fixed';
+    container.style.top = '0';
+    container.style.left = '0';
+    container.style.width = '100%';
+    container.style.height = '100%';
+    container.style.zIndex = '1000000000';
+    container.style.backgroundColor = color;
+    document.body.appendChild(container);
+
     for (let i = 0; i < flashes; i++) {
         setTimeout(() => {
-            document.body.style.backgroundColor = color;
+            console.log("BLINK!");
+            container.style.backgroundColor = color;
+            if (rapidCapture) captureImage();
         }, i * delay * 2);
         setTimeout(() => {
-            document.body.style.backgroundColor = 'rgb(0, 0, 0)';
+            console.log("BLINK!");
+            container.style.backgroundColor = 'rgb(0, 0, 0)';
         }, i * delay * 2 + delay);
     }
+
+    var totalDuration = flashes * delay * 2;
+    setTimeout(() => {
+        if (container.parentNode) {
+            container.parentNode.removeChild(container);
+        }
+        if (typeof then === 'function') {
+            then();
+        }
+    }, totalDuration);
+
     var showButton = true ? button == null || button == true : false;
     if (showButton) {
         // Show photo booth button after 2 seconds
@@ -145,4 +170,60 @@ if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initializeButtonEffects);
 } else {
     initializeButtonEffects();
+}
+
+function triggerCenterFlash(onComplete) {
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const diagonal = Math.hypot(viewportWidth, viewportHeight);
+    const baseSize = 20;
+    const finalScale = (diagonal / baseSize) * 1.25;
+
+    // Circular flash that expands from center very rapidly.
+    const circleFlash = document.createElement('div');
+    circleFlash.style.position = 'fixed';
+    circleFlash.style.top = '50%';
+    circleFlash.style.left = '50%';
+    circleFlash.style.width = `${baseSize}px`;
+    circleFlash.style.height = `${baseSize}px`;
+    circleFlash.style.borderRadius = '50%';
+    circleFlash.style.pointerEvents = 'none';
+    circleFlash.style.zIndex = '100050';
+    circleFlash.style.background = 'radial-gradient(circle, rgba(255,255,255,1) 0%, rgba(255,255,255,0.98) 35%, rgba(255,255,255,0.72) 58%, rgba(255,255,255,0) 75%)';
+    circleFlash.style.transform = 'translate(-50%, -50%) scale(0.05)';
+    document.body.appendChild(circleFlash);
+
+    // White bloom overlay for a stronger camera-flash feel.
+    const bloom = document.createElement('div');
+    bloom.style.position = 'fixed';
+    bloom.style.inset = '0';
+    bloom.style.background = '#fff';
+    bloom.style.opacity = '0';
+    bloom.style.pointerEvents = 'none';
+    bloom.style.zIndex = '100040';
+    document.body.appendChild(bloom);
+
+    circleFlash.animate(
+        [
+            { transform: 'translate(-50%, -50%) scale(0.05)', opacity: 1 },
+            { transform: `translate(-50%, -50%) scale(${finalScale})`, opacity: 1 },
+            { transform: `translate(-50%, -50%) scale(${finalScale * 1.05})`, opacity: 0 }
+        ],
+        { duration: 260, easing: 'cubic-bezier(0.12, 0.85, 0.2, 1)', fill: 'forwards' }
+    );
+
+    bloom.animate(
+        [
+            { opacity: 0 },
+            { opacity: 0.92, offset: 0.35 },
+            { opacity: 0 }
+        ],
+        { duration: 280, easing: 'ease-out', fill: 'forwards' }
+    );
+
+    setTimeout(() => {
+        circleFlash.remove();
+        bloom.remove();
+        if (typeof onComplete === 'function') onComplete();
+    }, 300);
 }
