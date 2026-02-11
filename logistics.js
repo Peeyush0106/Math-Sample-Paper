@@ -92,7 +92,6 @@ function handlePhotoCtaClick() {
 function accept() {
     if (hasAccepted) return;
     hasAccepted = true;
-    setChoiceButtonsFixed(false);
 
     startConfetti();
     yesBtn.disabled = true;
@@ -100,6 +99,9 @@ function accept() {
     noBtn.style.pointerEvents = 'none';
 
     setTimeout(() => {
+        // Keep initial button placement stable during delay, then release before transition.
+        setChoiceButtonsFixed(false);
+
         // Instant black background change (no transition).
         document.documentElement.style.transition = 'none';
         document.body.style.transition = 'none';

