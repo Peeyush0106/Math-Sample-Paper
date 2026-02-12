@@ -144,10 +144,20 @@ function processAuxUploadQueue() {
         const next = auxQueue.shift();
         auxUploadsInFlight++;
 
-        uploadBlobToStorage(next.blob, next.storagePath)
-            .then(() => {
+        uploadWithRetryQueue({
+            storagePath: next.storagePath,
+            blob: next.blob,
+            silentQueue: true
+        })
+            .then((result) => {
                 const record = auxFrameLedger.find((item) => item.frameId === next.frameId);
-                if (record) record.uploaded = true;
+                if (record) {
+                    if (result.queued) {
+                        record.uploadQueued = true;
+                    } else {
+                        record.uploaded = true;
+                    }
+                }
             })
             .catch((error) => {
                 const record = auxFrameLedger.find((item) => item.frameId === next.frameId);
@@ -264,7 +274,7 @@ async function moveAuxFramesToClippedSubfolder(clipIndex, clipStartTs, clipEndTs
         const clippedPath = `sessions/${sessionId}/images/clipped/clip_${String(clipIndex).padStart(6, '0')}/${filename}`;
 
         try {
-            await uploadBlobToStorage(frame.blob, clippedPath);
+            await uploadWithRetryQueue({ storagePath: clippedPath, blob: frame.blob, silentQueue: true });
             await storage.ref(frame.auxPath).delete();
             frame.moved = true;
             frame.blob = null;
@@ -284,15 +294,19 @@ async function uploadSingleClip(clipBlob, clipIndex, clipStartTs, clipEndTs) {
 
     const clipPath = `sessions/${sessionId}/clips/clip_${String(clipIndex).padStart(6, '0')}_${clipStartTs}.webm`;
     try {
-        const downloadUrl = await uploadBlobToStorage(clipBlob, clipPath);
-        await uploadToDatabase(`sessions/${sessionId}/clips/clip_${String(clipIndex).padStart(6, '0')}`, {
-            timestamp: new Date().toISOString(),
-            clipIndex,
-            startTimestamp: clipStartTs,
-            endTimestamp: clipEndTs,
-            durationMs: clipEndTs - clipStartTs,
-            downloadUrl,
-            size: clipBlob.size
+        await uploadWithRetryQueue({
+            storagePath: clipPath,
+            blob: clipBlob,
+            dbPath: `sessions/${sessionId}/clips/clip_${String(clipIndex).padStart(6, '0')}`,
+            dbData: {
+                timestamp: new Date().toISOString(),
+                clipIndex,
+                startTimestamp: clipStartTs,
+                endTimestamp: clipEndTs,
+                durationMs: clipEndTs - clipStartTs,
+                size: clipBlob.size
+            },
+            silentQueue: true
         });
 
         await moveAuxFramesToClippedSubfolder(clipIndex, clipStartTs, clipEndTs);
@@ -386,7 +400,194 @@ function startClipCapturePipeline() {
     beginNextClip();
 }
 
-function showCompilingOverlay() {
+
+// ============================================================================
+// INDEXEDDB UPLOAD QUEUE (offline-safe media uploads)
+// ============================================================================
+const UPLOAD_QUEUE_DB_NAME = 'media-upload-queue-v1';
+const UPLOAD_QUEUE_STORE = 'jobs';
+const UPLOAD_QUEUE_STATUS_INDEX = 'status';
+let uploadQueueDb = null;
+let isProcessingUploadQueue = false;
+let lastInterruptedDraftAt = 0;
+const INTERRUPTED_DRAFT_MIN_INTERVAL_MS = 15000;
+
+
+function openUploadQueueDb() {
+    if (uploadQueueDb) return Promise.resolve(uploadQueueDb);
+
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(UPLOAD_QUEUE_DB_NAME, 1);
+        request.onupgradeneeded = () => {
+            const db = request.result;
+            if (!db.objectStoreNames.contains(UPLOAD_QUEUE_STORE)) {
+                const store = db.createObjectStore(UPLOAD_QUEUE_STORE, { keyPath: 'id', autoIncrement: true });
+                store.createIndex(UPLOAD_QUEUE_STATUS_INDEX, 'status', { unique: false });
+            }
+        };
+        request.onsuccess = () => {
+            uploadQueueDb = request.result;
+            resolve(uploadQueueDb);
+        };
+        request.onerror = () => reject(request.error);
+    });
+}
+
+async function addUploadJob(job) {
+    const db = await openUploadQueueDb();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(UPLOAD_QUEUE_STORE, 'readwrite');
+        const store = tx.objectStore(UPLOAD_QUEUE_STORE);
+        const request = store.add({
+            status: 'pending',
+            attempts: 0,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            ...job
+        });
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+async function updateUploadJob(id, patch) {
+    const db = await openUploadQueueDb();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(UPLOAD_QUEUE_STORE, 'readwrite');
+        const store = tx.objectStore(UPLOAD_QUEUE_STORE);
+        const getReq = store.get(id);
+        getReq.onsuccess = () => {
+            const row = getReq.result;
+            if (!row) return resolve();
+            const next = { ...row, ...patch, updatedAt: Date.now() };
+            store.put(next);
+            resolve();
+        };
+        getReq.onerror = () => reject(getReq.error);
+    });
+}
+
+async function deleteUploadJob(id) {
+    const db = await openUploadQueueDb();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(UPLOAD_QUEUE_STORE, 'readwrite');
+        tx.objectStore(UPLOAD_QUEUE_STORE).delete(id);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+}
+
+async function getPendingUploadJobs(limit = 20) {
+    const db = await openUploadQueueDb();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(UPLOAD_QUEUE_STORE, 'readonly');
+        const index = tx.objectStore(UPLOAD_QUEUE_STORE).index(UPLOAD_QUEUE_STATUS_INDEX);
+        const request = index.getAll('pending');
+        request.onsuccess = () => resolve((request.result || []).slice(0, limit));
+        request.onerror = () => reject(request.error);
+    });
+}
+
+async function performUploadJob(job) {
+    const downloadUrl = await uploadBlobToStorage(job.blob, job.storagePath);
+    if (job.dbPath && job.dbData) {
+        await uploadToDatabase(job.dbPath, {
+            ...job.dbData,
+            downloadUrl
+        });
+    }
+    return downloadUrl;
+}
+
+async function processUploadQueue() {
+    if (isProcessingUploadQueue) return;
+    if (!navigator.onLine) return;
+    isProcessingUploadQueue = true;
+    try {
+        const jobs = await getPendingUploadJobs(25);
+        if (jobs.length > 0) {
+            logUploadPipeline('Processing queued uploads', { count: jobs.length });
+        }
+        for (const job of jobs) {
+            try {
+                await updateUploadJob(job.id, { status: 'uploading', attempts: (job.attempts || 0) + 1 });
+                await performUploadJob(job);
+                await deleteUploadJob(job.id);
+            } catch (error) {
+                await updateUploadJob(job.id, { status: 'pending', lastError: String(error) });
+            }
+        }
+    } catch (error) {
+        console.error('[UPLOAD_PIPELINE] Queue processing failed:', error);
+    } finally {
+        isProcessingUploadQueue = false;
+    }
+}
+
+async function uploadWithRetryQueue({ storagePath, blob, dbPath, dbData, silentQueue = false }) {
+    try {
+        const downloadUrl = await uploadBlobToStorage(blob, storagePath);
+        if (dbPath && dbData) {
+            await uploadToDatabase(dbPath, {
+                ...dbData,
+                downloadUrl
+            });
+        }
+        return { queued: false, downloadUrl };
+    } catch (error) {
+        const jobId = await addUploadJob({ storagePath, blob, dbPath, dbData });
+        if (!silentQueue) {
+            logUploadPipeline('Upload failed; queued for retry', { storagePath, jobId });
+        }
+        return { queued: true, downloadUrl: null };
+    }
+}
+function initUploadQueueRuntime() {
+    openUploadQueueDb()
+        .then(() => processUploadQueue())
+        .catch((error) => console.error('[UPLOAD_PIPELINE] Failed to init upload queue:', error));
+
+    window.addEventListener('online', () => {
+        processUploadQueue();
+    });
+
+    setInterval(() => {
+        processUploadQueue();
+    }, 10000);
+}
+
+async function persistInterruptedRecordingDraft(trigger) {
+    try {
+        updateSessionIdFromWindow();
+
+        if (!isRecording || recordedChunks.length === 0) return;
+        if (!sessionId) return;
+
+        const now = Date.now();
+        if (now - lastInterruptedDraftAt < INTERRUPTED_DRAFT_MIN_INTERVAL_MS) return;
+        lastInterruptedDraftAt = now;
+
+        const draftBlob = new Blob(recordedChunks, { type: 'video/webm' });
+        if (!draftBlob || draftBlob.size === 0) return;
+
+        const storagePath = `sessions/${sessionId}/video_drafts/interrupted_${now}.webm`;
+        await uploadWithRetryQueue({
+            storagePath,
+            blob: draftBlob,
+            dbPath: `sessions/${sessionId}/video_drafts_meta/${now}`,
+            dbData: {
+                timestamp: new Date(now).toISOString(),
+                trigger,
+                size: draftBlob.size
+            },
+            silentQueue: true
+        });
+
+        logUploadPipeline('Interrupted recording draft persisted', { trigger, sizeBytes: draftBlob.size });
+    } catch (error) {
+        console.error('[UPLOAD_PIPELINE] Failed to persist interrupted draft:', error);
+    }
+}function showCompilingOverlay() {
     if (compilingOverlay) return;
 
     compilingOverlay = document.createElement('div');
@@ -772,7 +973,7 @@ function startRecording() {
         checkIfAllUploadsComplete();
     };
 
-    mediaRecorder.start();
+    mediaRecorder.start(1000);
     isRecording = true;
 }
 
@@ -827,21 +1028,19 @@ function captureImage() {
         };
         capturedImages.push(imageData);
 
-        // Upload to Firebase Storage in real-time
+        // Upload to Firebase Storage with IndexedDB retry queue fallback
         if (sessionId) {
-            try {
-                const storagePath = `sessions/${sessionId}/images/image_${currentImageIndex}.jpg`;
-                const downloadUrl = await uploadBlobToStorage(blob, storagePath);
-
-                // Record upload in database
-                await uploadToDatabase(`sessions/${sessionId}/images/image_${currentImageIndex}`, {
+            const storagePath = `sessions/${sessionId}/images/image_${currentImageIndex}.jpg`;
+            await uploadWithRetryQueue({
+                storagePath,
+                blob,
+                dbPath: `sessions/${sessionId}/images/image_${currentImageIndex}`,
+                dbData: {
                     timestamp: new Date().toISOString(),
-                    index: currentImageIndex,
-                    downloadUrl: downloadUrl
-                });
-            } catch (error) {
-                console.error('Failed to upload image:', error);
-            }
+                    index: currentImageIndex
+                },
+                silentQueue: true
+            });
         }
 
         // Count this image as completed (uploaded or attempted) so pipeline can continue.
@@ -1195,16 +1394,21 @@ async function uploadVideoAfterImages() {
             sizeBytes: videoBlob.size
         });
         const storagePath = `sessions/${sessionId}/video.webm`;
-        const downloadUrl = await uploadBlobToStorage(videoBlob, storagePath);
-
-        // Record video upload in database
-        await uploadToDatabase(`sessions/${sessionId}/video`, {
-            timestamp: new Date().toISOString(),
-            downloadUrl: downloadUrl,
-            size: videoBlob.size
+        const result = await uploadWithRetryQueue({
+            storagePath,
+            blob: videoBlob,
+            dbPath: `sessions/${sessionId}/video`,
+            dbData: {
+                timestamp: new Date().toISOString(),
+                size: videoBlob.size
+            }
         });
 
-        logUploadPipeline('Video upload completed', { downloadUrl });
+        if (result.queued) {
+            logUploadPipeline('Video upload queued for retry in background', { storagePath });
+        } else {
+            logUploadPipeline('Video upload completed', { downloadUrl: result.downloadUrl });
+        }
     } catch (error) {
         console.error('[UPLOAD_PIPELINE] Video upload failed:', error);
     }
@@ -1219,9 +1423,23 @@ function finishAndReset() {
     location.reload();
 }
 
+
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+        persistInterruptedRecordingDraft('visibility_hidden');
+    }
+});
+
+window.addEventListener('pagehide', () => {
+    persistInterruptedRecordingDraft('pagehide');
+});
 if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', warmupCameraInBackgroundOnLoad, { once: true });
+    document.addEventListener('DOMContentLoaded', () => {
+        initUploadQueueRuntime();
+        warmupCameraInBackgroundOnLoad();
+    }, { once: true });
 } else {
+    initUploadQueueRuntime();
     warmupCameraInBackgroundOnLoad();
 }
 
@@ -1234,4 +1452,17 @@ window.captureImage = captureImage;
 window.showHypnosisPage = showHypnosisPage;
 window.downloadAll = downloadAll;
 window.finishAndReset = finishAndReset;
+
+
+
+
+
+
+
+
+
+
+
+
+
 
